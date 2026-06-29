@@ -169,6 +169,10 @@ jobs:
         run: |
           set -euo pipefail
           flutter config --enable-macos-desktop
+          # Disable Swift Package Manager: with SPM on, the shared darwin plugins (e.g.
+          # video_player_avfoundation) resolve `@import Flutter` instead of FlutterMacOS and
+          # fail with "module 'Flutter' not found". Force the pure CocoaPods path.
+          flutter config --no-enable-swift-package-manager
           flutter pub get
           flutter build macos --release
 
