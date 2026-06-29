@@ -174,6 +174,11 @@ jobs:
           # fail with "module 'Flutter' not found". Force the pure CocoaPods path.
           flutter config --no-enable-swift-package-manager
           flutter pub get
+          # Build arm64 only. The default universal (x86_64+arm64) build cross-compiles the
+          # webcrypto/BoringSSL native asset for x86_64 on the arm64 runner, which fails to
+          # link the fiat_p256 ADX assembly. We only target Apple Silicon. ARCHS is forwarded
+          # to xcodebuild via Flutter's FLUTTER_XCODE_* passthrough.
+          export FLUTTER_XCODE_ARCHS=arm64
           flutter build macos --release
 
       - name: Package .app as zip
