@@ -125,6 +125,66 @@ jobs:
           path: toralchat-web-${{ steps.resolve.outputs.target }}.tar.gz
           if-no-files-found: error
 
+  build_macos:
+    needs: build
+    if: needs.build.outputs.skip == 'false'
+    # macos-14 runners are Apple Silicon => native arm64 build.
+    runs-on: macos-14
+    env:
+      TARGET: ${{ needs.build.outputs.target }}
+    steps:
+      - name: Clone upstream at target tag
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$TARGET" \
+            "https://github.com/${UPSTREAM_REPO}.git" upstream
+
+      - name: Neutralize hardcoded signing team (ad-hoc build)
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          # Upstream pins krille-chan's DEVELOPMENT_TEAM; blank it so automatic signing
+          # doesn't try to resolve a provisioning profile we don't own. Release config
+          # already uses the ad-hoc identity "-".
+          sed -i '' 's/DEVELOPMENT_TEAM = [A-Z0-9]*;/DEVELOPMENT_TEAM = "";/g' \
+            macos/Runner.xcodeproj/project.pbxproj
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: upstream/.tool_versions.yaml
+          cache: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build macOS (arm64, ad-hoc signed)
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          flutter config --enable-macos-desktop
+          flutter pub get
+          flutter build macos --release
+
+      - name: Package .app as zip
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          APP="build/macos/Build/Products/Release/FluffyChat.app"
+          # Guarantee a valid ad-hoc signature (sandboxed apps must be signed to launch).
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" \
+            "../toralchat-macos-arm64-${TARGET}.zip"
+
+      - name: Upload macOS bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-bundle
+          path: toralchat-macos-arm64-${{ env.TARGET }}.zip
+          if-no-files-found: error
+
   deploy:
     needs: build
     if: needs.build.outputs.skip == 'false'
@@ -138,28 +198,34 @@ jobs:
         uses: actions/deploy-pages@v4
 
   release:
-    needs: [build, deploy]
+    needs: [build, deploy, build_macos]
     if: needs.build.outputs.skip == 'false'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TARGET: ${{ needs.build.outputs.target }}
     steps:
-      - name: Download release bundle
+      - name: Download web bundle
         uses: actions/download-artifact@v4
         with:
           name: release-bundle
 
+      - name: Download macOS bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-bundle
+
       - name: Create or update release
         run: |
           set -euo pipefail
+          ASSETS=( "toralchat-web-${TARGET}.tar.gz" "toralchat-macos-arm64-${TARGET}.zip" )
           if gh release view "$TARGET" -R "${{ github.repository }}" >/dev/null 2>&1; then
-            # Forced rebuild of an existing release: refresh the asset.
-            gh release upload "$TARGET" "toralchat-web-${TARGET}.tar.gz" \
+            # Forced rebuild of an existing release: refresh the assets.
+            gh release upload "$TARGET" "${ASSETS[@]}" \
               -R "${{ github.repository }}" --clobber
           else
-            gh release create "$TARGET" "toralchat-web-${TARGET}.tar.gz" \
+            gh release create "$TARGET" "${ASSETS[@]}" \
               -R "${{ github.repository }}" \
               --title "Toral Chat ${TARGET}" \
-              --notes "Built from upstream ${UPSTREAM_REPO} ${TARGET} and deployed to https://chat.housetoral.uk"
+              --notes "Built from upstream ${UPSTREAM_REPO} ${TARGET}. Web deployed to https://chat.housetoral.uk. macOS (Apple Silicon) app attached below — it is ad-hoc signed (not notarized), so on first launch right-click the app and choose Open, or run: xattr -dr com.apple.quarantine /Applications/FluffyChat.app"
           fi

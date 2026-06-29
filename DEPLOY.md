@@ -18,7 +18,25 @@ runs daily (and can be triggered manually). On each run it:
 6. Deploys `build/web` straight to GitHub Pages via the native Actions deployment
    (`actions/upload-pages-artifact` + `actions/deploy-pages`) — **no `gh-pages` branch**. The
    [`chat.housetoral.uk`](deploy/CNAME) custom domain is included in the artifact.
-7. Creates a matching GitHub **release** here with the web bundle attached.
+7. In parallel, builds a native **macOS (Apple Silicon / arm64)** `.app` on a `macos-14`
+   runner and zips it.
+8. Creates a matching GitHub **release** here with both the web bundle and the macOS `.zip`
+   attached.
+
+## macOS app
+
+Each release attaches `toralchat-macos-arm64-<tag>.zip` — a native Apple Silicon build of stock
+FluffyChat (not pre-configured; enter `matrix.housetoral.uk` on first login).
+
+It is **ad-hoc signed, not notarized** (no Apple Developer account), so Gatekeeper quarantines it on
+download. To run it the first time:
+
+```sh
+xattr -dr com.apple.quarantine /path/to/FluffyChat.app   # or right-click the app → Open
+```
+
+then move it to `/Applications`. The build is patched at CI time only to blank upstream's hardcoded
+`DEVELOPMENT_TEAM` so the unsigned/ad-hoc build succeeds — no app behavior is changed.
 
 ### Why an overlay (and not a merge)?
 
