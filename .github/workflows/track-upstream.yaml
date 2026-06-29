@@ -139,14 +139,18 @@ jobs:
           git clone --depth 1 --branch "$TARGET" \
             "https://github.com/${UPSTREAM_REPO}.git" upstream
 
-      - name: Neutralize hardcoded signing team (ad-hoc build)
+      - name: Force manual ad-hoc signing (no Apple account)
         working-directory: upstream
         run: |
           set -euo pipefail
-          # Upstream pins krille-chan's DEVELOPMENT_TEAM; blank it so automatic signing
-          # doesn't try to resolve a provisioning profile we don't own. Release config
-          # already uses the ad-hoc identity "-".
-          sed -i '' 's/DEVELOPMENT_TEAM = [A-Z0-9]*;/DEVELOPMENT_TEAM = "";/g' \
+          # Upstream pins krille-chan's DEVELOPMENT_TEAM and uses Automatic signing, which
+          # fails on CI without their account. Switch every config to Manual ad-hoc signing
+          # (identity "-", no team / no provisioning profile). xcodebuild still applies the
+          # Release.entitlements (sandbox + network client), so the app launches locally.
+          sed -i '' \
+            -e 's/DEVELOPMENT_TEAM = [A-Z0-9]*;/DEVELOPMENT_TEAM = "";/g' \
+            -e 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' \
+            -e 's/CODE_SIGN_IDENTITY = "Apple Development";/CODE_SIGN_IDENTITY = "-";/g' \
             macos/Runner.xcodeproj/project.pbxproj
 
       - name: Set up Flutter
@@ -173,8 +177,8 @@ jobs:
         run: |
           set -euo pipefail
           APP="build/macos/Build/Products/Release/FluffyChat.app"
-          # Guarantee a valid ad-hoc signature (sandboxed apps must be signed to launch).
-          codesign --force --deep --sign - "$APP"
+          # xcodebuild already ad-hoc signed the app with its entitlements; just verify and zip.
+          codesign --verify --verbose=2 "$APP"
           ditto -c -k --sequesterRsrc --keepParent "$APP" \
             "../toralchat-macos-arm64-${TARGET}.zip"
 
