@@ -1,8 +1,11 @@
 name: Track Upstream & Deploy
 
 # Detects new stable releases in krille-chan/fluffychat, builds a web bundle with our
-# customizations (deploy/config.json overlay, root base-href, custom domain), creates a
-# matching release in this repo, and deploys it to GitHub Pages at chat.housetoral.uk.
+# customizations (deploy/config.json overlay, root base-href, custom domain), deploys it to
+# GitHub Pages at chat.housetoral.uk, and creates a matching release in this repo.
+#
+# Build, deploy, and release are separate jobs so that re-running the failed deploy job does
+# not re-upload the Pages artifact (which would trip "Multiple artifacts named github-pages").
 
 on:
   schedule:
@@ -28,11 +31,11 @@ env:
   UPSTREAM_REPO: krille-chan/fluffychat
 
 jobs:
-  track-and-deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+    outputs:
+      skip: ${{ steps.resolve.outputs.skip }}
+      target: ${{ steps.resolve.outputs.target }}
     steps:
       - name: Checkout this repo (deployment overlay)
         uses: actions/checkout@v4
@@ -110,21 +113,48 @@ jobs:
         with:
           path: upstream/build/web
 
+      - name: Package release bundle
+        if: steps.resolve.outputs.skip == 'false'
+        run: tar -czf "toralchat-web-${{ steps.resolve.outputs.target }}.tar.gz" -C upstream/build/web .
+
+      - name: Upload release bundle
+        if: steps.resolve.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: toralchat-web-${{ steps.resolve.outputs.target }}.tar.gz
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deploy
-        if: steps.resolve.outputs.skip == 'false'
         uses: actions/deploy-pages@v4
 
-      - name: Create release in this repo
-        if: steps.resolve.outputs.skip == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET: ${{ steps.resolve.outputs.target }}
+  release:
+    needs: [build, deploy]
+    if: needs.build.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TARGET: ${{ needs.build.outputs.target }}
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+
+      - name: Create or update release
         run: |
           set -euo pipefail
-          tar -czf "toralchat-web-${TARGET}.tar.gz" -C upstream/build/web .
           if gh release view "$TARGET" -R "${{ github.repository }}" >/dev/null 2>&1; then
-            # Forced rebuild of an existing release: just refresh the asset.
+            # Forced rebuild of an existing release: refresh the asset.
             gh release upload "$TARGET" "toralchat-web-${TARGET}.tar.gz" \
               -R "${{ github.repository }}" --clobber
           else
