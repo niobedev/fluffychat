@@ -1,0 +1,135 @@
+name: Track Upstream & Deploy
+
+# Detects new stable releases in krille-chan/fluffychat, builds a web bundle with our
+# customizations (deploy/config.json overlay, root base-href, custom domain), creates a
+# matching release in this repo, and deploys it to GitHub Pages at chat.housetoral.uk.
+
+on:
+  schedule:
+    # Daily at 04:17 UTC. Offset from the hour to avoid GitHub's cron congestion.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force_tag:
+        description: 'Upstream tag to (re)build & deploy, even if already released here. Leave empty to track the latest stable release.'
+        required: false
+        type: string
+
+concurrency:
+  group: track-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create releases & tags in this repo
+  pages: write      # deploy to GitHub Pages
+  id-token: write   # OIDC token required by actions/deploy-pages
+
+env:
+  UPSTREAM_REPO: krille-chan/fluffychat
+
+jobs:
+  track-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout this repo (deployment overlay)
+        uses: actions/checkout@v4
+
+      - name: Resolve target upstream release
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FORCE_TAG="${{ inputs.force_tag }}"
+          if [ -n "$FORCE_TAG" ]; then
+            TARGET="$FORCE_TAG"
+            echo "Forced target tag: $TARGET"
+          else
+            # /releases/latest excludes drafts and pre-releases => stable only.
+            TARGET="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+            echo "Latest upstream stable tag: $TARGET"
+          fi
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+          # Skip if we've already released this tag, unless a force_tag was provided.
+          if [ -z "$FORCE_TAG" ] && gh release view "$TARGET" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TARGET already exists in ${{ github.repository }} — nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clone upstream at target tag
+        if: steps.resolve.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ steps.resolve.outputs.target }}" \
+            "https://github.com/${UPSTREAM_REPO}.git" upstream
+
+      - name: Apply config overlay
+        if: steps.resolve.outputs.skip == 'false'
+        run: cp deploy/config.json upstream/web/config.json
+
+      - name: Set up Flutter
+        if: steps.resolve.outputs.skip == 'false'
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: upstream/.tool_versions.yaml
+          cache: true
+
+      - name: Set up Rust
+        if: steps.resolve.outputs.skip == 'false'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add rust-src component (nightly)
+        if: steps.resolve.outputs.skip == 'false'
+        run: rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+
+      - name: Build web (root base-href)
+        if: steps.resolve.outputs.skip == 'false'
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          ./scripts/prepare-web.sh
+          rm ./assets/vodozemac/.gitignore
+          flutter pub get
+          flutter build web \
+            --dart-define=FLUTTER_WEB_CANVASKIT_URL=canvaskit/ \
+            --release --source-maps --base-href "/"
+
+      - name: Add custom domain (CNAME)
+        if: steps.resolve.outputs.skip == 'false'
+        run: cp deploy/CNAME upstream/build/web/CNAME
+
+      - name: Upload Pages artifact
+        if: steps.resolve.outputs.skip == 'false'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: upstream/build/web
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        if: steps.resolve.outputs.skip == 'false'
+        uses: actions/deploy-pages@v4
+
+      - name: Create release in this repo
+        if: steps.resolve.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ steps.resolve.outputs.target }}
+        run: |
+          set -euo pipefail
+          tar -czf "toralchat-web-${TARGET}.tar.gz" -C upstream/build/web .
+          if gh release view "$TARGET" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            # Forced rebuild of an existing release: just refresh the asset.
+            gh release upload "$TARGET" "toralchat-web-${TARGET}.tar.gz" \
+              -R "${{ github.repository }}" --clobber
+          else
+            gh release create "$TARGET" "toralchat-web-${TARGET}.tar.gz" \
+              -R "${{ github.repository }}" \
+              --title "Toral Chat ${TARGET}" \
+              --notes "Built from upstream ${UPSTREAM_REPO} ${TARGET} and deployed to https://chat.housetoral.uk"
+          fi
